@@ -64,11 +64,16 @@ io.on('connection', (socket) => {
   });
 
   socket.on('disconnect', () => {
-    const { roomId, role } = socket.data;
-    if (!roomId || !rooms[roomId]) return;
-    console.log(`${role} disconnected from room ${roomId}`);
-    socket.to(roomId).emit('peer-disconnected', { role });
-    delete rooms[roomId];
+  const { roomId, role } = socket.data;
+  if (!roomId || !rooms[roomId]) return;
+
+  console.log(`${role} disconnected from room ${roomId}`);
+
+  // Notify the other peer
+  socket.to(roomId).emit('peer-disconnected', { role });
+
+  // Clean up the room so it can't be rejoined
+  delete rooms[roomId];
   });
 });
 
