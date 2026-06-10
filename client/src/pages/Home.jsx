@@ -12,22 +12,28 @@ export default function Home() {
 
   // Sender: drop a file → create room → go to room page
   const handleFileDrop = (file) => {
-    if (!socket) return;
-    socket.emit('create-room', ({ roomId }) => {
-      navigate(`/room/${roomId}`, { state: { role: 'sender', file } });
+  console.log("File dropped:", file);
+
+  if (!socket) {
+    console.log("Socket is null");
+    return;
+  }
+
+  console.log("Emitting create-room");
+
+  socket.emit('create-room', ({ roomId }) => {
+    console.log("Room created response:", roomId);
+
+    navigate(`/room/${roomId}`, {
+      state: { role: 'sender', file }
     });
-  };
+  });
+};
 
   // Receiver: enter room ID → join room → go to room page
   const handleJoinRoom = () => {
-    if (!socket || !roomInput.trim()) return;
-    socket.emit('join-room', roomInput.trim(), (res) => {
-      if (res.error) {
-        setError(res.error);
-        return;
-      }
-      navigate(`/room/${roomInput.trim()}`, { state: { role: 'receiver' } });
-    });
+    if (!roomInput.trim()) return;
+    navigate(`/room/${roomInput.trim()}`, { state: { role: 'receiver' } });
   };
 
   return (

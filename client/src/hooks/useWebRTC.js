@@ -7,6 +7,8 @@ const BUFFER_THRESHOLD = 1024 * 1024;
 export function useWebRTC({ socket, roomId, role, onFileReceived, onProgress }) {
   const peerRef = useRef(null);
   const channelRef = useRef(null);
+  const hasHandledOffer = useRef(false);
+  const listenersSetUp = useRef(false);
   const [connectionState, setConnectionState] = useState('idle');
 
   // ── Create and wire up RTCPeerConnection ───────────────
@@ -18,50 +20,156 @@ export function useWebRTC({ socket, roomId, role, onFileReceived, onProgress }) 
     };
 
     peer.oniceconnectionstatechange = () => {
-      const state = peer.iceConnectionState;
-      console.log('ICE state:', state);
-      if (state === 'connected' || state === 'completed') {
-        setConnectionState('connected');
-      }
-      if (state === 'disconnected' || state === 'failed' || state === 'closed') {
-        setConnectionState('disconnected');
-      }
-    };
+  const state = peer.iceConnectionState;
+  console.log('ICE state:', state);
+  // Only handle failures here — connected is set by DataChannel onopen
+  if (state === 'disconnected' || state === 'failed' || state === 'closed') {
+    setConnectionState('disconnected');
+  }
+};
 
     return peer;
   }, [socket]);
 
   // ── Sender: initiate offer after receiver joins ────────
   const startAsInitiator = useCallback(async () => {
-    setConnectionState('connecting');
-    const peer = createPeer();
-    peerRef.current = peer;
+  setConnectionState('connecting');
+  const peer = createPeer();
+  peerRef.current = peer;
 
-    const channel = peer.createDataChannel('fileTransfer');
-    channelRef.current = channel;
-    setupSenderChannel(channel);
+  const channel = peer.createDataChannel('fileTransfer');
+channelRef.current = channel;
 
-    const offer = await peer.createOffer();
-    await peer.setLocalDescription(offer);
-    socket.emit('offer', offer);
-  }, [createPeer, socket]);
+channel.onopen = () => {
+  console.log('DataChannel open — ready to send');
+  setConnectionState('connected'); // ← moved here, fires only when truly open
+};
+channel.onerror = (e) => console.error('DataChannel error:', e);
+
+  const offer = await peer.createOffer();
+  await peer.setLocalDescription(offer);
+  socket.emit('offer', offer);
+  console.log('Offer sent');
+}, [createPeer, socket]);
 
   // ── Receiver: handle incoming offer ───────────────────
   const handleOffer = useCallback(async (offer) => {
-    setConnectionState('connecting');
-    const peer = createPeer();
-    peerRef.current = peer;
+  setConnectionState('connecting');
+  const peer = createPeer();
+  peerRef.current = peer;
 
-    peer.ondatachannel = ({ channel }) => {
-      channelRef.current = channel;
-      setupReceiverChannel(channel);
+  peer.ondatachannel = ({ channel }) => {
+    console.log('DataChannel received by receiver');
+    channelRef.current = channel;
+
+    // Wire up receiver channel directly here
+    let metadata = null;
+    let receivedChunks = [];
+    let pendingHeader = null;
+    let expectingBinary = false;
+    let startTime = null;
+    let bytesReceived = 0;
+    let transferDone = false;
+
+    channel.onopen = () => {
+      console.log('DataChannel open — ready to receive');
+      setConnectionState('connected');
     };
 
-    await peer.setRemoteDescription(offer);
-    const answer = await peer.createAnswer();
-    await peer.setLocalDescription(answer);
-    socket.emit('answer', answer);
-  }, [createPeer, socket]);
+    channel.onmessage = async ({ data }) => {
+      if (typeof data === 'string') {
+        const message = JSON.parse(data);
+
+        if (message.type === 'metadata') {
+          metadata = message;
+          receivedChunks = new Array(message.totalChunks);
+          startTime = Date.now();
+          bytesReceived = 0;
+          console.log(`Receiving: ${message.name}`);
+          return;
+        }
+
+        if (message.type === 'chunk') {
+          pendingHeader = message;
+          expectingBinary = true;
+          return;
+        }
+
+        if (message.type === 'done') {
+  transferDone = true;
+  console.log('Done message received');
+  return;
+}
+      }
+
+      if (data instanceof ArrayBuffer && expectingBinary && pendingHeader) {
+        expectingBinary = false;
+        const { index, hash } = pendingHeader;
+
+        const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+        const computedHash = Array.from(new Uint8Array(hashBuffer))
+          .map(b => b.toString(16).padStart(2, '0'))
+          .join('');
+
+        if (computedHash !== hash) {
+          console.error(`Hash mismatch on chunk ${index}`);
+          return;
+        }
+
+        receivedChunks[index] = data;
+        console.log(
+  `Chunk ${index} stored. Total: ${
+    receivedChunks.filter(c => c !== undefined).length
+  }/${metadata.totalChunks}`
+);
+       if (
+  transferDone &&
+  receivedChunks.every(chunk => chunk !== undefined)
+) {
+  console.log('All chunks received. Rebuilding file...');
+
+  const blob = new Blob(receivedChunks, {
+    type: metadata.mimeType,
+  });
+
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = metadata.name;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+
+  console.log(`Downloaded: ${metadata.name}`);
+}       
+
+        bytesReceived += data.byteLength;
+
+        if (onProgress) {
+          const elapsed = (Date.now() - startTime) / 1000;
+          const speedMBps = ((bytesReceived / elapsed) / (1024 * 1024)).toFixed(2);
+          onProgress({
+            received: bytesReceived,
+            total: metadata.size,
+            percent: Math.round((bytesReceived / metadata.size) * 100),
+            speed: speedMBps,
+          });
+        }
+
+        pendingHeader = null;
+      }
+    };
+
+    channel.onerror = (e) => console.error('DataChannel error:', e);
+  };
+
+  await peer.setRemoteDescription(offer);
+  const answer = await peer.createAnswer();
+  await peer.setLocalDescription(answer);
+  socket.emit('answer', answer);
+  console.log('Answer sent');
+}, [createPeer, socket, onProgress, onFileReceived]);
 
   // ── Sender DataChannel setup ───────────────────────────
   const setupSenderChannel = (channel) => {
@@ -230,46 +338,61 @@ export function useWebRTC({ socket, roomId, role, onFileReceived, onProgress }) 
 
   // ── Socket listeners ───────────────────────────────────
   useEffect(() => {
-    if (!socket) return;
+  if (!socket || listenersSetUp.current) return;
+  listenersSetUp.current = true;
 
-    socket.on('receiver-joined', () => {
-      if (role === 'sender') startAsInitiator();
-    });
+  console.log('Setting up socket listeners, role:', role);
 
-    socket.on('offer', (offer) => {
-      if (role === 'receiver') handleOffer(offer);
-    });
+  const onReceiverJoined = () => {
+    console.log('receiver-joined received, role:', role);
+    if (role === 'sender') startAsInitiator();
+  };
 
-    socket.on('answer', async (answer) => {
-      if (peerRef.current) {
-        await peerRef.current.setRemoteDescription(answer);
+  const onOffer = (offer) => {
+    console.log('offer received, role:', role);
+    if (role === 'receiver' && !hasHandledOffer.current) {
+      hasHandledOffer.current = true;
+      handleOffer(offer);
+    }
+  };
+
+  const onAnswer = async (answer) => {
+    console.log('answer received');
+    if (peerRef.current) {
+      await peerRef.current.setRemoteDescription(answer);
+    }
+  };
+
+  const onIceCandidate = async (candidate) => {
+    if (peerRef.current) {
+      try {
+        await peerRef.current.addIceCandidate(candidate);
+      } catch (e) {
+        console.error('Error adding ICE candidate:', e);
       }
-    });
+    }
+  };
 
-    socket.on('ice-candidate', async (candidate) => {
-      if (peerRef.current) {
-        try {
-          await peerRef.current.addIceCandidate(candidate);
-        } catch (e) {
-          console.error('Error adding ICE candidate:', e);
-        }
-      }
-    });
+  const onPeerDisconnected = ({ role: disconnectedRole }) => {
+    setConnectionState('disconnected');
+    console.log(`${disconnectedRole} disconnected`);
+  };
 
-    socket.on('peer-disconnected', ({ role: disconnectedRole }) => {
-      setConnectionState('disconnected');
-      console.log(`${disconnectedRole} disconnected`);
-    });
+  socket.on('receiver-joined', onReceiverJoined);
+  socket.on('offer', onOffer);
+  socket.on('answer', onAnswer);
+  socket.on('ice-candidate', onIceCandidate);
+  socket.on('peer-disconnected', onPeerDisconnected);
 
-    return () => {
-      socket.off('receiver-joined');
-      socket.off('offer');
-      socket.off('answer');
-      socket.off('ice-candidate');
-      socket.off('peer-disconnected');
-    };
-  }, [socket, role, startAsInitiator, handleOffer]);
-
+  return () => {
+    socket.off('receiver-joined', onReceiverJoined);
+    socket.off('offer', onOffer);
+    socket.off('answer', onAnswer);
+    socket.off('ice-candidate', onIceCandidate);
+    socket.off('peer-disconnected', onPeerDisconnected);
+    listenersSetUp.current = false;
+  };
+}, [socket]);
   // ── Cleanup on unmount ─────────────────────────────────
   useEffect(() => {
     return () => {

@@ -1,9 +1,9 @@
 import { useParams, useLocation, useNavigate } from 'react-router-dom';
-import { useState, useEffect } from 'react';
 import { useSocket } from '../context/SocketContext';
 import { useWebRTC } from '../hooks/useWebRTC';
 import StatusBadge from '../components/StatusBadge';
 import ProgressBar from '../components/ProgressBar';
+import { useState, useEffect, useRef, useCallback } from 'react';
 
 export default function Room() {
   const { roomId } = useParams();
@@ -17,6 +17,7 @@ export default function Room() {
   const [progress, setProgress] = useState({ percent: 0, speed: null });
   const [receivedFile, setReceivedFile] = useState(null);
   const [copied, setCopied] = useState(false);
+  const hasJoined = useRef(false);
 
   const { connectionState, sendFile } = useWebRTC({
     socket,
@@ -26,12 +27,58 @@ export default function Room() {
     onFileReceived: (f) => setReceivedFile(f),
   });
 
-  // Sender: once connected, start sending the file
+  // Receiver joins room only once
   useEffect(() => {
-    if (role === 'sender' && connectionState === 'connected' && file) {
-      sendFile(file);
+    if (!socket || !roomId) return;
+    if (role === 'receiver' && !hasJoined.current) {
+      hasJoined.current = true;
+      console.log('Receiver joining room:', roomId);
+      socket.emit('join-room', roomId, (res) => {
+        if (res.error) {
+          console.error('Join error:', res.error);
+        } else {
+          console.log('Receiver joined room successfully');
+        }
+      });
     }
-  }, [connectionState]);
+  }, [socket, roomId, role]);
+
+  // Sender: trigger file send once connected
+  const hasSentFile = useRef(false);
+
+useEffect(() => {
+  if (
+    role === 'sender' &&
+    connectionState === 'connected' &&
+    file &&
+    !hasSentFile.current
+  ) {
+    hasSentFile.current = true;
+    console.log("Starting file send...");
+    sendFile(file);
+  }
+}, [connectionState, role, file]);
+
+const handleProgress = useCallback((p) => {
+  setProgress(p);
+}, []);
+
+const handleFileReceived = useCallback((f) => {
+  setReceivedFile(f);
+}, []);
+
+useWebRTC({
+  socket,
+  roomId,
+  role,
+  onProgress: handleProgress,
+  onFileReceived: handleFileReceived,
+});
+
+useEffect(() => {
+  hasSentFile.current = false;
+}, [file]);
+
 
   const copyLink = () => {
     navigator.clipboard.writeText(window.location.href);
