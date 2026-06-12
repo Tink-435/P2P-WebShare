@@ -96,13 +96,46 @@ channel.onerror = (e) => console.error('DataChannel error:', e);
         }
 
         if (message.type === 'done') {
-  transferDone = true;
-  console.log('Done message received');
-  return;
+        transferDone = true;
+        if (
+  receivedChunks.filter(c => c !== undefined).length === metadata.totalChunks
+) {
+  console.log('All chunks already received when DONE arrived');
+
+  const blob = new Blob(receivedChunks, {
+    type: metadata.mimeType,
+  });
+
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = metadata.name;
+  document.body.appendChild(a);
+  console.log("ABOUT TO OPEN BLOB");
+window.open(url, "_blank");
+console.log("BLOB OPEN CALLED");
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+
+  console.log(`Downloaded: ${metadata.name}`);
 }
+       console.log(
+  'Done message received:',
+  receivedChunks.filter(c => c !== undefined).length,
+  '/',
+  metadata?.totalChunks
+);
+        return;
+        }
       }
 
       if (data instanceof ArrayBuffer && expectingBinary && pendingHeader) {
+        console.log(
+    "Binary received",
+    pendingHeader.index,
+    data.byteLength
+  );
+
         expectingBinary = false;
         const { index, hash } = pendingHeader;
 
@@ -124,7 +157,7 @@ channel.onerror = (e) => console.error('DataChannel error:', e);
 );
        if (
   transferDone &&
-  receivedChunks.every(chunk => chunk !== undefined)
+  receivedChunks.filter(chunk => chunk !== undefined).length === metadata.totalChunks
 ) {
   console.log('All chunks received. Rebuilding file...');
 
@@ -142,6 +175,8 @@ channel.onerror = (e) => console.error('DataChannel error:', e);
   URL.revokeObjectURL(url);
 
   console.log(`Downloaded: ${metadata.name}`);
+   console.log("Download URL:", url);
+console.log("File size:", blob.size);  
 }       
 
         bytesReceived += data.byteLength;
@@ -270,6 +305,7 @@ channel.onerror = (e) => console.error('DataChannel error:', e);
       URL.revokeObjectURL(url);
 
       console.log(`Downloaded: ${metadata.name}`);
+         
       setConnectionState('done');
       if (onFileReceived) onFileReceived({ name: metadata.name, size: metadata.size });
     };
@@ -310,7 +346,7 @@ channel.onerror = (e) => console.error('DataChannel error:', e);
       const hashHex = Array.from(new Uint8Array(hashBuffer))
         .map(b => b.toString(16).padStart(2, '0'))
         .join('');
-
+      console.log(`Sending header ${chunkIndex}`);
       channel.send(JSON.stringify({
         type: 'chunk',
         index: chunkIndex,
@@ -318,6 +354,7 @@ channel.onerror = (e) => console.error('DataChannel error:', e);
         size: arrayBuffer.byteLength,
         hash: hashHex,
       }));
+      console.log(`Sending binary ${chunkIndex}`);
       channel.send(arrayBuffer);
 
       if (onProgress) {
@@ -331,7 +368,7 @@ channel.onerror = (e) => console.error('DataChannel error:', e);
       offset += CHUNK_SIZE;
       chunkIndex++;
     }
-
+    console.log('Sending DONE');
     channel.send(JSON.stringify({ type: 'done' }));
     console.log('File send complete');
   }, [onProgress]);

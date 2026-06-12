@@ -14,7 +14,12 @@ export default function Room() {
   const role = state?.role;
   const file = state?.file;
 
-  const [progress, setProgress] = useState({ percent: 0, speed: null });
+  const [progress, setProgress] = useState({
+  percent: 0,
+  speed: null,
+  received: 0,
+  total: 0,
+});
   const [receivedFile, setReceivedFile] = useState(null);
   const [copied, setCopied] = useState(false);
   const hasJoined = useRef(false);
@@ -24,7 +29,11 @@ export default function Room() {
     socket,
     roomId,
     role,
-    onProgress: (p) => setProgress(p),
+    onProgress: (p) =>
+  setProgress((prev) => ({
+    ...prev,
+    ...p,
+  })),
     onFileReceived: (f) => setReceivedFile(f),
   });
 
@@ -121,7 +130,13 @@ export default function Room() {
         )}
 
         {(connectionState === 'connected' || connectionState === 'done') && (
-          <ProgressBar percent={progress.percent} speed={progress.speed} />
+         <ProgressBar
+  percent={progress.percent}
+  speed={progress.speed}
+  received={progress.received}
+  sent={progress.sent}
+  total={progress.total}
+/>
         )}
 
         {role === 'sender' && connectionState === 'idle' && (
